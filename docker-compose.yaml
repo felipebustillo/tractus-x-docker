@@ -1,0 +1,596 @@
+###############################################################################
+# Tractus-X Local Dataspace
+#
+# Usage:
+#   docker compose up            # Start everything + seed + E2E test
+#   docker compose up -d         # Detached mode
+#   docker compose logs seed     # Check seeding progress
+#   docker compose logs e2e-test # Check E2E test results
+#   docker compose down -v       # Full reset (destroy volumes)
+###############################################################################
+
+x-java-env: &java-env
+  JAVA_TOOL_OPTIONS: "${JAVA_TOOL_OPTIONS:--Xmx256m}"
+
+x-vault-env: &vault-env
+  VAULT_ADDR: "http://localhost:8200"
+
+###############################################################################
+# Infrastructure
+###############################################################################
+
+services:
+  # --- Shared PostgreSQL ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Vault instances (dev mode) ---
+  identityhub-vault:
+    image: hashicorp/vault:1.15
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bdrs-vault:
+    image: hashicorp/vault:1.15
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  provider-vault:
+    image: hashicorp/vault:1.15
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  consumer-vault:
+    image: hashicorp/vault:1.15
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- DID Resolution Proxy ---
+  identity-hub:
+    image: nginx:alpine
+    volumes:
+      - ./config/nginx-did-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "29084:80"
+    depends_on:
+      identityhub:
+        condition: service_healthy
+
+  # --- Vault Init (one-shot) ---
+  vault-init:
+    image: hashicorp/vault:1.15
+    environment:
+      <<: *vault-env
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        echo "=== Seeding identityhub-vault ==="
+        VAULT_ADDR=http://identityhub-vault:8200 VAULT_TOKEN=root vault kv put secret/password content=password
+
+        echo "=== Seeding bdrs-vault ==="
+        VAULT_ADDR=http://bdrs-vault:8200 VAULT_TOKEN=root vault kv put secret/mgmt-api-key content=${BDRS_API_KEY}
+        VAULT_ADDR=http://bdrs-vault:8200 VAULT_TOKEN=root vault kv put secret/edc.datasource.didentry.user content=${BDRS_DB_USER}
+        VAULT_ADDR=http://bdrs-vault:8200 VAULT_TOKEN=root vault kv put secret/edc.datasource.didentry.password content=${BDRS_DB_PASSWORD}
+
+        echo "=== Seeding provider-vault ==="
+        VAULT_ADDR=http://provider-vault:8200 VAULT_TOKEN=root vault kv put secret/token-signer-key content='{"kty":"OKP","d":"DMYb8nuC9d9NFd_J1qWW3ObQsb5_RT8qNYz03s0-zF8","crv":"Ed25519","kid":"did:web:identity-hub:BPNL00000003AYRE#key-1","x":"3OxPgxas-x7HPbV44CR-JdrZ4sHqB1uVqVcnOdWCYGM"}'
+
+        echo "=== Seeding consumer-vault ==="
+        echo "(STS secrets will be synced by seed script after IH creates participants)"
+
+        echo "=== All vaults seeded ==="
+    depends_on:
+      identityhub-vault:
+        condition: service_healthy
+      bdrs-vault:
+        condition: service_healthy
+      provider-vault:
+        condition: service_healthy
+      consumer-vault:
+        condition: service_healthy
+
+###############################################################################
+# Applications
+###############################################################################
+
+  # --- Identity Hub ---
+  identityhub:
+    image: tractusx/identityhub:${IDENTITYHUB_TAG}
+    volumes:
+      - ./config/ih-logging.properties:/app/logging.properties:ro
+    environment:
+      <<: *java-env
+      # API endpoints
+      WEB_HTTP_PORT: "8081"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_IDENTITY_PORT: "8082"
+      WEB_HTTP_IDENTITY_PATH: "/api/identity"
+      WEB_HTTP_IDENTITY_AUTH_ALIAS: "password"
+      WEB_HTTP_CREDENTIALS_PORT: "8083"
+      WEB_HTTP_CREDENTIALS_PATH: "/api/credentials"
+      WEB_HTTP_DID_PORT: "8084"
+      WEB_HTTP_DID_PATH: "/"
+      WEB_HTTP_ACCOUNTS_PORT: "8085"
+      WEB_HTTP_ACCOUNTS_PATH: "/api/accounts"
+      WEB_HTTP_VERSION_PORT: "8086"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      WEB_HTTP_STS_PORT: "8087"
+      WEB_HTTP_STS_PATH: "/api/sts"
+      # Identity
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      EDC_IH_IAM_ID: "did:web:identity-hub:${BPN_ISSUER}"
+      EDC_IAM_ACCESSTOKEN_JTI_VALIDATION: "false"
+      # Vault
+      EDC_VAULT_HASHICORP_URL: "http://identityhub-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+      # SQL store → datasource mappings (triggers Flyway migrations)
+      EDC_SQL_STORE_PARTICIPANTCONTEXT_DATASOURCE: "participantcontext"
+      EDC_SQL_STORE_KEYPAIR_DATASOURCE: "keypair"
+      EDC_SQL_STORE_DIDRESOURCE_DATASOURCE: "didresource"
+      EDC_SQL_STORE_STSCLIENT_DATASOURCE: "stsclient"
+      EDC_SQL_STORE_CREDENTIALREQUEST_DATASOURCE: "credentialrequest"
+      EDC_SQL_STORE_CREDENTIALS_DATASOURCE: "credentials"
+      EDC_SQL_STORE_JTI_DATASOURCE: "jti"
+      # PostgreSQL datasources (all point to same db)
+      EDC_DATASOURCE_PARTICIPANTCONTEXT_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_PARTICIPANTCONTEXT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_PARTICIPANTCONTEXT_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_KEYPAIR_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_KEYPAIR_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_KEYPAIR_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_DIDRESOURCE_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_DIDRESOURCE_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DIDRESOURCE_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_STSCLIENT_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_STSCLIENT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_STSCLIENT_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_CREDENTIALREQUEST_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_CREDENTIALREQUEST_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_CREDENTIALREQUEST_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_CREDENTIALS_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_CREDENTIALS_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_CREDENTIALS_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_JTI_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_JTI_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_JTI_PASSWORD: "${POSTGRES_PASSWORD}"
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/ih"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+    ports:
+      - "29082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/api/check/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+
+  # --- BDRS Server ---
+  bdrs-server:
+    image: tractusx/bdrs-server:0.5.7
+    environment:
+      <<: *java-env
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_MANAGEMENT_PORT: "8081"
+      WEB_HTTP_MANAGEMENT_PATH: "/api/management"
+      WEB_HTTP_MANAGEMENT_AUTH_KEY_ALIAS: "mgmt-api-key"
+      WEB_HTTP_MANAGEMENT_AUTH_TYPE: "tokenbased"
+      WEB_HTTP_DIRECTORY_PORT: "8082"
+      WEB_HTTP_DIRECTORY_PATH: "/api/directory"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      EDC_IAM_ISSUER_ID: "did:web:identity-hub:${BPN_ISSUER}"
+      # Trusted issuers (required for IATP auth on directory API)
+      "EDC_IAM_TRUSTED-ISSUER_0-ISSUER_ID": "did:web:identity-hub:${BPN_ISSUER}"
+      EDC_VAULT_HASHICORP_URL: "http://bdrs-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+      EDC_DATASOURCE_DIDENTRY_NAME: "didentry"
+      EDC_DATASOURCE_DIDENTRY_URL: "jdbc:postgresql://postgres:5432/bdrs"
+      EDC_DATASOURCE_DIDENTRY_USER: "${BDRS_DB_USER}"
+      EDC_DATASOURCE_DIDENTRY_PASSWORD: "${BDRS_DB_PASSWORD}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/check/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+
+  # --- Issuer Service ---
+  issuerservice:
+    image: tractusx/issuerservice:latest
+    profiles: ["full"]
+    environment:
+      <<: *java-env
+      WEB_HTTP_PORT: "8081"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_ISSUANCE_PORT: "8082"
+      WEB_HTTP_ISSUANCE_PATH: "/api/issuance"
+      WEB_HTTP_DID_PORT: "8083"
+      WEB_HTTP_DID_PATH: "/"
+      WEB_HTTP_VERSION_PORT: "8084"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      WEB_HTTP_STS_PORT: "8085"
+      WEB_HTTP_STS_PATH: "/api/sts"
+      WEB_HTTP_ISSUERADMIN_PORT: "8086"
+      WEB_HTTP_ISSUERADMIN_PATH: "/api/admin"
+      WEB_HTTP_IDENTITY_PORT: "8087"
+      WEB_HTTP_IDENTITY_PATH: "/api/identity"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      EDC_IAM_ACCESSTOKEN_JTI_VALIDATION: "false"
+      EDC_VAULT_HASHICORP_URL: "http://identityhub-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/issuer"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+
+  # --- Provider Control Plane ---
+  provider-controlplane:
+    image: tractusx/edc-controlplane-postgresql-hashicorp-vault:0.11.0
+    volumes:
+      - ./config/edc-logging.properties:/app/logging.properties:ro
+    environment:
+      <<: *java-env
+      EDC_HOSTNAME: "provider-controlplane"
+      # Identity (EDC_PARTICIPANT_ID must be the DID, not BPN)
+      EDC_PARTICIPANT_ID: "did:web:identity-hub:${BPN_PROVIDER}"
+      TRACTUSX_EDC_PARTICIPANT_BPN: "${BPN_PROVIDER}"
+      EDC_IAM_ISSUER_ID: "did:web:identity-hub:${BPN_PROVIDER}"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      # STS (CRITICAL: TX_EDC_IAM_STS_DIM_URL must NOT be set)
+      EDC_IAM_STS_OAUTH_TOKEN_URL: "http://identityhub:8087/api/sts/token"
+      EDC_IAM_STS_OAUTH_CLIENT_ID: "did:web:identity-hub:${BPN_PROVIDER}"
+      EDC_IAM_STS_OAUTH_CLIENT_SECRET_ALIAS: "sts-oauth-client-secret"
+      # Credential service (base64 of BPNL00000003AYRE)
+      TX_EDC_IAM_IATP_CREDENTIALSERVICE_URL: "http://identityhub:8083/api/credentials/v1/participants/QlBOTDAwMDAwMDAzQVlSRQ=="
+      # Default scopes
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_ALIAS: "org.eclipse.tractusx.vc.type"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_TYPE: "MembershipCredential"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_OPERATION: "read"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_ALIAS: "org.eclipse.tractusx.vc.type"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_TYPE: "DataExchangeGovernanceCredential"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_OPERATION: "read"
+      # DSP callback
+      EDC_DSP_CALLBACK_ADDRESS: "http://provider-controlplane:8084/api/v1/dsp"
+      # BDRS
+      TX_EDC_IAM_IATP_BDRS_SERVER_URL: "http://bdrs-server:8082/api/directory"
+      TX_EDC_IAM_IATP_BDRS_CACHE_VALIDITY: "600"
+      # DCP
+      TX_EDC_DID_SERVICE_SELF_REGISTRATION_ENABLED: "false"
+      # Trusted issuers
+      "EDC_IAM_TRUSTED-ISSUER_0-ISSUER_ID": "did:web:identity-hub:${BPN_ISSUER}"
+      "EDC_IAM_TRUSTED-ISSUER_0-ISSUER_SUPPORTEDTYPES": '["MembershipCredential","FrameworkCredential","BpnCredential","DataExchangeGovernanceCredential","DismantlerCredential"]'
+      # Management API
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_MANAGEMENT_PORT: "8081"
+      WEB_HTTP_MANAGEMENT_PATH: "/management"
+      WEB_HTTP_MANAGEMENT_AUTH_KEY: "${EDC_API_KEY}"
+      WEB_HTTP_CATALOG_PORT: "8082"
+      WEB_HTTP_CATALOG_PATH: "/catalog"
+      WEB_HTTP_CONTROL_PORT: "8083"
+      WEB_HTTP_CONTROL_PATH: "/control"
+      WEB_HTTP_PROTOCOL_PORT: "8084"
+      WEB_HTTP_PROTOCOL_PATH: "/api/v1/dsp"
+      WEB_HTTP_VERSION_PORT: "8085"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      # Database
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/edc_provider"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Vault
+      EDC_VAULT_HASHICORP_URL: "http://provider-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+    ports:
+      - "29281:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/check/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+      identityhub:
+        condition: service_healthy
+
+  # --- Provider Data Plane ---
+  provider-dataplane:
+    image: tractusx/edc-dataplane-hashicorp-vault:0.11.0
+    environment:
+      <<: *java-env
+      EDC_HOSTNAME: "provider-dataplane"
+      EDC_PARTICIPANT_ID: "${BPN_PROVIDER}"
+      EDC_IAM_ISSUER_ID: "did:web:identity-hub:${BPN_PROVIDER}"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      # STS (same as controlplane)
+      EDC_IAM_STS_OAUTH_TOKEN_URL: "http://identityhub:8087/api/sts/token"
+      EDC_IAM_STS_OAUTH_CLIENT_ID: "did:web:identity-hub:${BPN_PROVIDER}"
+      EDC_IAM_STS_OAUTH_CLIENT_SECRET_ALIAS: "sts-oauth-client-secret"
+      # API endpoints
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_PUBLIC_PORT: "8081"
+      WEB_HTTP_PUBLIC_PATH: "/api/public"
+      WEB_HTTP_CONTROL_PORT: "8083"
+      WEB_HTTP_CONTROL_PATH: "/api/dataplane/control"
+      WEB_HTTP_VERSION_PORT: "8084"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      EDC_DATAPLANE_API_PUBLIC_BASEURL: "http://provider-dataplane:8081/api/public"
+      EDC_TRANSFER_PROXY_TOKEN_SIGNER_PRIVATEKEY_ALIAS: "token-signer-key"
+      EDC_TRANSFER_PROXY_TOKEN_VERIFIER_PUBLICKEY_ALIAS: "token-signer-key"
+      EDC_DPF_SELECTOR_URL: "http://provider-controlplane:8083/control/v1/dataplanes"
+      # Database
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/edc_provider"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Vault
+      EDC_VAULT_HASHICORP_URL: "http://provider-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/check/startup || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+      provider-controlplane:
+        condition: service_healthy
+
+  # --- Consumer Control Plane ---
+  consumer-controlplane:
+    image: tractusx/edc-controlplane-postgresql-hashicorp-vault:0.11.0
+    environment:
+      <<: *java-env
+      EDC_HOSTNAME: "consumer-controlplane"
+      # Identity (EDC_PARTICIPANT_ID must be the DID, not BPN)
+      EDC_PARTICIPANT_ID: "did:web:identity-hub:${BPN_CONSUMER}"
+      TRACTUSX_EDC_PARTICIPANT_BPN: "${BPN_CONSUMER}"
+      EDC_IAM_ISSUER_ID: "did:web:identity-hub:${BPN_CONSUMER}"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      # STS (CRITICAL: TX_EDC_IAM_STS_DIM_URL must NOT be set)
+      EDC_IAM_STS_OAUTH_TOKEN_URL: "http://identityhub:8087/api/sts/token"
+      EDC_IAM_STS_OAUTH_CLIENT_ID: "did:web:identity-hub:${BPN_CONSUMER}"
+      EDC_IAM_STS_OAUTH_CLIENT_SECRET_ALIAS: "sts-oauth-client-secret"
+      # Credential service (base64 of BPNL00000003AZQP)
+      TX_EDC_IAM_IATP_CREDENTIALSERVICE_URL: "http://identityhub:8083/api/credentials/v1/participants/QlBOTDAwMDAwMDAzQVpRUA=="
+      # Default scopes
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_ALIAS: "org.eclipse.tractusx.vc.type"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_TYPE: "MembershipCredential"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_MEMBERSHIP_OPERATION: "read"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_ALIAS: "org.eclipse.tractusx.vc.type"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_TYPE: "DataExchangeGovernanceCredential"
+      TX_EDC_IAM_IATP_DEFAULT_SCOPES_DATAEXCHANGE_OPERATION: "read"
+      # DSP callback
+      EDC_DSP_CALLBACK_ADDRESS: "http://consumer-controlplane:8084/api/v1/dsp"
+      # BDRS
+      TX_EDC_IAM_IATP_BDRS_SERVER_URL: "http://bdrs-server:8082/api/directory"
+      TX_EDC_IAM_IATP_BDRS_CACHE_VALIDITY: "600"
+      # DCP
+      TX_EDC_DID_SERVICE_SELF_REGISTRATION_ENABLED: "false"
+      # Trusted issuers
+      "EDC_IAM_TRUSTED-ISSUER_0-ISSUER_ID": "did:web:identity-hub:${BPN_ISSUER}"
+      "EDC_IAM_TRUSTED-ISSUER_0-ISSUER_SUPPORTEDTYPES": '["MembershipCredential","FrameworkCredential","BpnCredential","DataExchangeGovernanceCredential","DismantlerCredential"]'
+      # Management API
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_MANAGEMENT_PORT: "8081"
+      WEB_HTTP_MANAGEMENT_PATH: "/management"
+      WEB_HTTP_MANAGEMENT_AUTH_KEY: "${EDC_API_KEY}"
+      WEB_HTTP_CATALOG_PORT: "8082"
+      WEB_HTTP_CATALOG_PATH: "/catalog"
+      WEB_HTTP_CONTROL_PORT: "8083"
+      WEB_HTTP_CONTROL_PATH: "/control"
+      WEB_HTTP_PROTOCOL_PORT: "8084"
+      WEB_HTTP_PROTOCOL_PATH: "/api/v1/dsp"
+      WEB_HTTP_VERSION_PORT: "8085"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      # Database
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/edc_consumer"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Vault
+      EDC_VAULT_HASHICORP_URL: "http://consumer-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+    ports:
+      - "29181:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/check/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+      identityhub:
+        condition: service_healthy
+
+  # --- Consumer Data Plane ---
+  consumer-dataplane:
+    image: tractusx/edc-dataplane-hashicorp-vault:0.11.0
+    environment:
+      <<: *java-env
+      EDC_HOSTNAME: "consumer-dataplane"
+      EDC_PARTICIPANT_ID: "${BPN_CONSUMER}"
+      EDC_IAM_ISSUER_ID: "did:web:identity-hub:${BPN_CONSUMER}"
+      EDC_IAM_DID_WEB_USE_HTTPS: "false"
+      # STS (same as controlplane)
+      EDC_IAM_STS_OAUTH_TOKEN_URL: "http://identityhub:8087/api/sts/token"
+      EDC_IAM_STS_OAUTH_CLIENT_ID: "did:web:identity-hub:${BPN_CONSUMER}"
+      EDC_IAM_STS_OAUTH_CLIENT_SECRET_ALIAS: "sts-oauth-client-secret"
+      # API endpoints
+      WEB_HTTP_PORT: "8080"
+      WEB_HTTP_PATH: "/api"
+      WEB_HTTP_PUBLIC_PORT: "8081"
+      WEB_HTTP_PUBLIC_PATH: "/api/public"
+      WEB_HTTP_CONTROL_PORT: "8083"
+      WEB_HTTP_CONTROL_PATH: "/api/dataplane/control"
+      WEB_HTTP_VERSION_PORT: "8084"
+      WEB_HTTP_VERSION_PATH: "/.well-known/api"
+      EDC_DATAPLANE_API_PUBLIC_BASEURL: "http://consumer-dataplane:8081/api/public"
+      EDC_TRANSFER_PROXY_TOKEN_SIGNER_PRIVATEKEY_ALIAS: "token-signer-key"
+      EDC_TRANSFER_PROXY_TOKEN_VERIFIER_PUBLICKEY_ALIAS: "token-signer-key"
+      EDC_DPF_SELECTOR_URL: "http://consumer-controlplane:8083/control/v1/dataplanes"
+      # Database
+      EDC_DATASOURCE_DEFAULT_URL: "jdbc:postgresql://postgres:5432/edc_consumer"
+      EDC_DATASOURCE_DEFAULT_USER: "${POSTGRES_USER}"
+      EDC_DATASOURCE_DEFAULT_PASSWORD: "${POSTGRES_PASSWORD}"
+      # Vault
+      EDC_VAULT_HASHICORP_URL: "http://consumer-vault:8200"
+      EDC_VAULT_HASHICORP_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      EDC_VAULT_HASHICORP_API_SECRET_PATH: "/v1/secret"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/api/check/startup || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+      consumer-controlplane:
+        condition: service_healthy
+
+###############################################################################
+# Automation
+###############################################################################
+
+  # --- Seed (one-shot) ---
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.seed
+    command: ["/scripts/seed.sh"]
+    environment:
+      DID_HOST: "${DID_HOST}"
+      BPN_PROVIDER: "${BPN_PROVIDER}"
+      BPN_CONSUMER: "${BPN_CONSUMER}"
+      BPN_ISSUER: "${BPN_ISSUER}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      BDRS_API_KEY: "${BDRS_API_KEY}"
+      EDC_API_KEY: "${EDC_API_KEY}"
+      VAULT_TOKEN: "${VAULT_DEV_ROOT_TOKEN_ID}"
+      PROVIDER_STS_SECRET: "${PROVIDER_STS_SECRET}"
+      CONSUMER_STS_SECRET: "${CONSUMER_STS_SECRET}"
+    depends_on:
+      identityhub:
+        condition: service_healthy
+      bdrs-server:
+        condition: service_healthy
+      provider-controlplane:
+        condition: service_healthy
+      consumer-controlplane:
+        condition: service_healthy
+      provider-dataplane:
+        condition: service_healthy
+      consumer-dataplane:
+        condition: service_healthy
+      identity-hub:
+        condition: service_started
+
+  # --- E2E Test (one-shot) ---
+  e2e-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.seed
+    command: ["/scripts/test-e2e.sh"]
+    environment:
+      DID_HOST: "${DID_HOST}"
+      BPN_PROVIDER: "${BPN_PROVIDER}"
+      BPN_CONSUMER: "${BPN_CONSUMER}"
+      EDC_API_KEY: "${EDC_API_KEY}"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  # --- Cleanup (manual, profiles: tools) ---
+  cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile.seed
+    command: ["/scripts/cleanup.sh"]
+    profiles: ["tools"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+
+volumes:
+  postgres-data:
