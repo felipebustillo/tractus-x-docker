@@ -23,7 +23,7 @@ The official [Minimum Viable Dataspace (MXD)](https://github.com/eclipse-tractus
                            Docker Compose Network
  ┌──────────────────────────────────────────────────────────────────────┐
  │                                                                      │
- │  ┌──────────────┐  DID resolution   ┌──────────────┐                │
+ │  ┌──────────────┐  DID resolution   ┌──────────────┐                 │
  │  │ identity-hub │◄──────────────────►│ Identity Hub │                │
  │  │   (nginx)    │   /{BPN}/did.json  │  (DCP/STS)   │                │
  │  └──────────────┘                    └──────┬───────┘                │
@@ -31,19 +31,19 @@ The official [Minimum Viable Dataspace (MXD)](https://github.com/eclipse-tractus
  │         ┌───────────────────────────────────┤                        │
  │         │ STS tokens                        │ STS tokens             │
  │         ▼                                   ▼                        │
- │  ┌──────────────┐  DSP protocol   ┌──────────────┐                  │
- │  │   Consumer   │◄───────────────►│   Provider   │                  │
- │  │ (CP + DP)    │  catalog/nego/  │ (CP + DP)    │                  │
- │  └──────┬───────┘  transfer       └──────┬───────┘                  │
+ │  ┌──────────────┐  DSP protocol   ┌──────────────┐                   │
+ │  │   Consumer   │◄───────────────►│   Provider   │                   │
+ │  │ (CP + DP)    │  catalog/nego/  │ (CP + DP)    │                   │
+ │  └──────┬───────┘  transfer       └──────┬───────┘                   │
  │         │                                │                           │
  │         │         ┌──────────┐           │                           │
- │         └────────►│   BDRS   │◄──────────┘                          │
- │           BPN→DID │  Server  │ BPN→DID                              │
+ │         └────────►│   BDRS   │◄──────────┘                           │
+ │           BPN→DID │  Server  │ BPN→DID                               │
  │                   └──────────┘                                       │
  │                                                                      │
- │  ┌──────────┐  ┌─────────────────────────────────────────────────┐  │
- │  │ Postgres │  │ Vault x4 (identityhub, bdrs, provider, consumer)│  │
- │  └──────────┘  └─────────────────────────────────────────────────┘  │
+ │  ┌──────────┐  ┌─────────────────────────────────────────────────┐   │
+ │  │ Postgres │  │ Vault x4 (identityhub, bdrs, provider, consumer)│   │
+ │  └──────────┘  └─────────────────────────────────────────────────┘   │
  └──────────────────────────────────────────────────────────────────────┘
 ```
 
