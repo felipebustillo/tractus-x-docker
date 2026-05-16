@@ -189,6 +189,43 @@ docker compose logs provider-controlplane # Provider CP logs
 docker compose rm -f e2e-test && docker compose up e2e-test
 ```
 
+## Joining an external dataspace (e.g. Hanka)
+
+This stack also doubles as a starting point if you operate your own EDC
+connector and want to participate in someone else's Tractus-X dataspace
+— for example, [Hanka](https://hanka.ai), which runs a Catena-X
+deployment that issues BPNs and credentials on your behalf.
+
+Hanka uses the **Option A** federated-wallet flow: you generate an
+Ed25519 keypair locally and hand Hanka the public JWK; they publish it
+as an extra `verificationMethod` in the DID document they serve at
+`https://identityhub.hanka.ai/<your-BPN>/did.json`. Hanka never sees
+your private key.
+
+To generate the registration bundle:
+
+```bash
+./scripts/generate-hanka-bundle.sh \
+    --bpn  BPNL00000000XXXX \
+    --dsp  https://edc.your-company.com/api/v1/dsp
+```
+
+This writes a directory containing:
+
+- `public.jwk` — paste into Hanka's admin UI under Connectors →
+  Register external connector
+- `private.jwk` — load into your own EDC's vault under alias equal to
+  the `kid` (`did:web:identityhub.hanka.ai:<BPN>#data-plane`)
+- `registration.json` — the full operator-side payload (BPN + DSP +
+  public JWK) in one copy-paste-ready blob
+- `README.txt` — step-by-step instructions for the remaining EDC
+  configuration
+
+The same script works for other dataspace operators by overriding
+`--dataspace-host`. The `kid` shape (`did:web:<host>:<BPN>#data-plane`)
+is a Tractus-X convention; if the operator expects a different suffix,
+edit the script.
+
 ## How It Works
 
 ### Seeding (12 steps)
